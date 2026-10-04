@@ -1,5 +1,10 @@
 {
+  "name": "figma-mcp-bridge",
   "private": true,
+  "workspaces": [
+    "server",
+    "plugin"
+  ],
   "devDependencies": {
     "husky": "^9.1.7",
     "lint-staged": "^17.3.0",
@@ -9,7 +14,8 @@
     "prepare": "husky",
     "format": "prettier --write --ignore-unknown .",
     "format:check": "prettier --check --ignore-unknown .",
-    "check": "cd server && bun run build && cd ../plugin && bun run typecheck && bun run build && cd .. && bun run format:check"
+    "check": "bun run --filter '*' typecheck && bun run --filter '*' build && bun run format:check",
+    "build": "bun run --filter '*' build"
   },
   "lint-staged": {
     "**/*": "prettier --write --ignore-unknown"
