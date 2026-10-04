@@ -2801,7 +2801,7 @@ figma.ui.onmessage = async (message) => {
   if (message.type === "server-request") {
     const response = await handleRequest(message.payload as ServerRequest);
     try {
-      figma.ui.postMessage(response);
+      figma.ui.postMessage(toCloneable(response));
     } catch (err) {
       figma.ui.postMessage({
         type: response.type,
@@ -2809,5 +2809,22 @@ figma.ui.onmessage = async (message) => {
         error: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+};
+
+// figma.ui.postMessage structured-clones across the sandbox boundary and
+// throws "Cannot unwrap symbol" when a payload contains `figma.mixed` (a
+// symbol) or other non-JSON values — e.g. raw PaintStyle/TextStyle objects
+// returned by get_styles on variable-font files. Sanitize once at this
+// boundary instead of per-handler: the iframe JSON.stringifies the message
+// right after, so a JSON round-trip is shape-preserving. Symbols (i.e.
+// figma.mixed) surface as the string "mixed".
+const toCloneable = <T>(value: T): T => {
+  try {
+    return JSON.parse(JSON.stringify(value, (_key, v) => (typeof v === "symbol" ? "mixed" : v)));
+  } catch {
+    // Circular or otherwise unserializable — return as-is and let the
+    // postMessage try/catch at the call site report the failure.
+    return value;
   }
 };
