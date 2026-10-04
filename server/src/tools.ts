@@ -9,6 +9,7 @@ import {
   createFrameInput,
   createImageInput,
   createPageInput,
+  switchPageInput,
   importHtmlLayersInput,
   createShapeShape,
   createTextShape,
@@ -344,6 +345,18 @@ export function registerTools(server: McpServer, node: Node, port: number): void
       if (!parsed.success) return parsed.error;
       const { fileKey, ...params } = parsed.data;
       return renderResponse(() => node.sendWithParams("create_page", undefined, params, fileKey));
+    }
+  );
+
+  server.tool(
+    "switch_page",
+    "Switch the Figma editor to an existing page — the desktop app UI follows along. Pass pageId or pageName; if both are given pageId wins. pageName must match exactly (case- and whitespace-sensitive); when several pages share a name the first one wins. Use get_metadata to list pages. The response also includes the full page list of the document. Typical flow: switch_page to the target page, then read its content with get_design_context / get_metadata / get_screenshot. When multiple files are connected, specify fileKey.",
+    switchPageInput.shape,
+    async (args): Promise<ToolResult> => {
+      const parsed = parseToolInput(toolInputSchemas.switch_page, args);
+      if (!parsed.success) return parsed.error;
+      const { fileKey, ...params } = parsed.data;
+      return renderResponse(() => node.sendWithParams("switch_page", undefined, params, fileKey));
     }
   );
 
@@ -972,7 +985,12 @@ async function loadImageSourceAsBase64(source: string, workspaceRoot: string): P
  * @returns Raw image bytes.
  */
 async function fetchImageBytes(source: string): Promise<Buffer> {
-  let url = new URL(source);
+  let url: URL;
+  try {
+    url = new URL(source);
+  } catch {
+    throw new Error(`Invalid image URL: ${source}`);
+  }
   let redirects = 0;
 
   while (true) {

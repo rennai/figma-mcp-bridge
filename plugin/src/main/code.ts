@@ -22,6 +22,7 @@ type RequestType =
   | "set_stroke_properties"
   | "set_auto_layout"
   | "create_page"
+  | "switch_page"
   | "create_frame"
   | "create_text"
   | "create_shape"
@@ -128,7 +129,12 @@ const sendStatus = () => {
   });
 };
 
-const serializeVariableValue = (value: VariableValue): unknown => {
+type SerializedVariableValue =
+  | { type: "VARIABLE_ALIAS"; id: string }
+  | { type: "COLOR"; r: number; g: number; b: number; a: number }
+  | VariableValue;
+
+const serializeVariableValue = (value: VariableValue): SerializedVariableValue => {
   if (typeof value === "object" && value !== null) {
     if ("type" in value && value.type === "VARIABLE_ALIAS") {
       return { type: "VARIABLE_ALIAS", id: value.id };
@@ -1453,6 +1459,50 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
             nodeId: node.id,
             nodeName: node.name,
             applied,
+          },
+        };
+      }
+      case "switch_page": {
+        const params = request.params ?? {};
+        const pageId = typeof params.pageId === "string" ? params.pageId : undefined;
+        const pageName = typeof params.pageName === "string" ? params.pageName : undefined;
+
+        let page: PageNode | undefined;
+        if (pageId) {
+          page = figma.root.children.find((child) => child.id === pageId);
+        } else if (pageName) {
+          page = figma.root.children.find((child) => child.name === pageName);
+        }
+
+        if (!page) {
+          throw new Error(
+            pageId || pageName
+              ? `Page not found: ${pageId ?? pageName}`
+              : "pageId or pageName is required for switch_page"
+          );
+        }
+
+        // The document is loaded with `documentAccess: "dynamic-page"`, so the
+        // page must be switched with the async setter — assigning
+        // `figma.currentPage` directly throws there.
+        //
+        // Load the page explicitly first: handing `setCurrentPageAsync` a
+        // remote (unloaded) page stub makes the runtime open a fresh
+        // connection to Figma's servers, which fails behind some network
+        // setups with "Unable to establish connection to Figma after 10
+        // seconds". `loadAsync()` pulls the page through the document's
+        // already-established channel instead.
+        await page.loadAsync();
+        await figma.setCurrentPageAsync(page);
+
+        return {
+          type: request.type,
+          requestId: request.requestId,
+          data: {
+            pageId: page.id,
+            pageName: page.name,
+            index: figma.root.children.indexOf(page),
+            pages: figma.root.children.map((child) => ({ id: child.id, name: child.name })),
           },
         };
       }
