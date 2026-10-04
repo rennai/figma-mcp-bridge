@@ -23,6 +23,7 @@ type RequestType =
   | "set_auto_layout"
   | "create_page"
   | "switch_page"
+  | "list_layers"
   | "create_frame"
   | "create_text"
   | "create_shape"
@@ -1503,6 +1504,56 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
             pageName: page.name,
             index: figma.root.children.indexOf(page),
             pages: figma.root.children.map((child) => ({ id: child.id, name: child.name })),
+          },
+        };
+      }
+      case "list_layers": {
+        const params = request.params ?? {};
+        const nodeId = typeof params.nodeId === "string" ? params.nodeId : undefined;
+        const pageId = typeof params.pageId === "string" ? params.pageId : undefined;
+
+        let container: PageNode | SceneNode;
+        if (nodeId) {
+          const node = await figma.getNodeByIdAsync(nodeId);
+          if (!node || node.type === "DOCUMENT") {
+            throw new Error(`Node not found: ${nodeId}`);
+          }
+          // In dynamic-page mode a page obtained by ID is not necessarily
+          // loaded yet — load it before reading its children (see switch_page).
+          if (node.type === "PAGE") {
+            await node.loadAsync();
+          }
+          container = node;
+        } else if (pageId) {
+          const page = figma.root.children.find((child) => child.id === pageId);
+          if (!page) {
+            throw new Error(`Page not found: ${pageId}`);
+          }
+          await page.loadAsync();
+          container = page;
+        } else {
+          container = figma.currentPage;
+        }
+
+        // Figma's layers panel lists the top-most layer first, while
+        // children[0] is the bottom-most — reverse for display order.
+        const children = "children" in container ? [...container.children] : [];
+        const layers = children.reverse().map((child) => ({
+          id: child.id,
+          name: child.name,
+          type: child.type,
+          visible: child.visible,
+          childrenCount: "children" in child ? child.children.length : 0,
+        }));
+
+        return {
+          type: request.type,
+          requestId: request.requestId,
+          data: {
+            parentId: container.id,
+            parentName: container.name,
+            parentType: container.type,
+            layers,
           },
         };
       }

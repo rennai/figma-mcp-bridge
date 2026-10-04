@@ -95,6 +95,7 @@ If you want to know more about how it works, read the [How it works](#how-it-wor
 | `set_auto_layout`              | Configure auto-layout direction, padding, gap, alignment, sizing, and wrap (not sections)                           |
 | `create_page`                  | Create a new page in the document, optionally switching to it                                                       |
 | `switch_page`                  | Switch the editor to an existing page by ID or name — the desktop UI follows along; response includes the page list |
+| `list_layers`                  | List a page's layers like the desktop layers panel (top-first); pass nodeId to expand a row deeper                  |
 | `create_frame`                 | Create a new frame, optionally under a parent                                                                       |
 | `create_section`               | Create a section — a named, resizable container (Figma and FigJam)                                                  |
 | `create_text`                  | Create a new text node                                                                                              |
@@ -137,6 +138,7 @@ All tools accept an optional `fileKey` parameter when multiple Figma files are c
 - `import_html_layers` takes a JSON file produced by [html-figma](https://github.com/sergcen/html-to-figma)'s browser `htmlToFigma()`. The path resolves relative to the MCP server working directory and must stay inside it, even when absolute. Everything lands inside one wrapper frame, and the response reports `layerCount` against `expectedLayerCount` so partial imports are visible.
 - `create_page` returns the new page's ID — pass it as `parentId` to `create_frame` / `create_text` / `create_shape` / `create_image` to author content on that page without switching the editor.
 - `switch_page` switches the editor to an existing page (by `pageId` or `pageName`) and the Figma desktop UI follows along. The response includes the document's full page list. To read another page's content, switch to it first, then call `get_design_context` / `get_metadata` / `get_screenshot`. If both are given, `pageId` wins; `pageName` matches exactly (case- and whitespace-sensitive) and the first matching page is used. Runtime behaviour in Dev Mode and FigJam documents is not yet verified.
+- `list_layers` lists layers in the order the Figma desktop layers panel shows them (top-most first). It defaults to the current page's top-level layers; pass `nodeId` to list a node's children (like expanding a row) or `pageId` to read another page without switching to it. Entries carry `childrenCount`, and any entry with `childrenCount > 0` is expandable — feed its `id` back as `nodeId` to walk deeper.
 
 ### What You Can Build
 

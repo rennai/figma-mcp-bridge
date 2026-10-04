@@ -10,6 +10,7 @@ import {
   createImageInput,
   createPageInput,
   switchPageInput,
+  listLayersInput,
   importHtmlLayersInput,
   createShapeShape,
   createTextShape,
@@ -357,6 +358,18 @@ export function registerTools(server: McpServer, node: Node, port: number): void
       if (!parsed.success) return parsed.error;
       const { fileKey, ...params } = parsed.data;
       return renderResponse(() => node.sendWithParams("switch_page", undefined, params, fileKey));
+    }
+  );
+
+  server.tool(
+    "list_layers",
+    "List layers the way the Figma desktop layers panel shows them (top-most layer first). Defaults to the current page's top-level layers; pass nodeId to list a node's children instead, like expanding a row in the panel. Each entry includes id, name, type, visibility, and childrenCount (entries with childrenCount > 0 are expandable — pass their id as nodeId to go deeper). To read another page's layers without switching the editor to it, pass pageId. When multiple files are connected, specify fileKey.",
+    listLayersInput.shape,
+    async (args): Promise<ToolResult> => {
+      const parsed = parseToolInput(toolInputSchemas.list_layers, args);
+      if (!parsed.success) return parsed.error;
+      const { fileKey, ...params } = parsed.data;
+      return renderResponse(() => node.sendWithParams("list_layers", undefined, params, fileKey));
     }
   );
 

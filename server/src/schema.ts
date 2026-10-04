@@ -440,6 +440,18 @@ export const switchPageInput = z.object({
   fileKey: fileKeyField,
 });
 
+export const listLayersInput = z.object({
+  pageId: createFigmaNodeIdSchema()
+    .optional()
+    .describe("List the top-level layers of this page (defaults to the current page)"),
+  nodeId: createFigmaNodeIdSchema()
+    .optional()
+    .describe(
+      "List the children of this node instead — like expanding a row in the layers panel (wins over pageId)"
+    ),
+  fileKey: fileKeyField,
+});
+
 export const createFrameInput = z.object({
   name: z.string().optional().describe("Optional frame name"),
   parentId: createFigmaNodeIdSchema()
@@ -967,6 +979,8 @@ export const toolInputSchemas = {
     "Provide pageId or pageName"
   ),
 
+  list_layers: listLayersInput,
+
   create_frame: createFrameInput.refine(
     (value) => value.fillOpacity === undefined || value.fillHex !== undefined,
     "fillHex is required when fillOpacity is provided"
@@ -1227,6 +1241,7 @@ const rpcToArgs: Record<
   set_auto_layout: (nodeIds, params) => ({ ...params, nodeId: nodeIds?.[0] }),
   create_page: (_nodeIds, params) => ({ ...params }),
   switch_page: (_nodeIds, params) => ({ ...params }),
+  list_layers: (_nodeIds, params) => ({ ...params }),
   create_frame: (_nodeIds, params) => ({ ...params }),
   create_section: (_nodeIds, params) => ({ ...params }),
   create_text: (_nodeIds, params) => ({ ...params }),
