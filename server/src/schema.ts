@@ -1320,11 +1320,15 @@ export function validateRpc(
   // drop them again, along with `fileKey`, which travels beside the params
   // rather than inside them. Leaving `nodeIds` in the params would leak into
   // per-tool param handling (e.g. set_node_properties' "has updates" check).
-  const {
-    nodeId: _nodeId,
-    nodeIds: _nodeIds,
-    fileKey: _fileKey,
-    ...rest
-  } = result.data as Record<string, unknown>;
+  // A `nodeId` the caller sent as a real param must survive, though:
+  // list_layers uses it to choose the node to expand, independent of the
+  // transport node ids — only drop the value folded in from `rpcToArgs`.
+  const rest: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(result.data as Record<string, unknown>)) {
+    if (key === "fileKey") continue;
+    if (key === "nodeIds" && nodeIds !== undefined) continue;
+    if (key === "nodeId" && params?.nodeId === undefined) continue;
+    rest[key] = value;
+  }
   return { error: null, params: rest };
 }
