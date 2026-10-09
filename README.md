@@ -2,6 +2,13 @@
 
 [![Pairing with Hopp](https://gethopp.app/git/hopp-shield.svg?ref=hopp-repo)](https://gethopp.app)
 
+## 本 Fork 相对上游的修改
+
+- 新增 `switch_page` 工具：按 `pageId` 或 `pageName` 切换 Figma 编辑器到指定页面（桌面端界面跟随切换），响应包含完整页面列表。
+- 新增 `list_layers` 工具：按桌面图层面板的顺序（最上层在前）列出图层，可用 `nodeId` 展开子图层、用 `pageId` 不切换页面直接读取其他页面的图层。
+- 修复插件响应包含 `figma.mixed` 等 symbol 值时 `figma.ui.postMessage` 抛出 “Cannot unwrap symbol” 的问题：在消息边界统一净化（JSON 序列化，symbol 转为 `"mixed"`）。
+- 根目录改用 Bun workspaces：`bun run --filter '*' typecheck/build` 统一执行子包脚本。
+
 - [Demo](#demo)
 - [Quick Start](#quick-start)
 - [Available Tools](#available-tools)
