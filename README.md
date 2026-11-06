@@ -78,6 +78,8 @@ If you want to know more about how it works, read the [How it works](#how-it-wor
 | `get_document`                 | Get the current Figma page document tree                                                                            |
 | `get_selection`                | Get the currently selected nodes in Figma                                                                           |
 | `get_node`                     | Get a specific Figma node by ID (colon format, e.g. `4029:12345`)                                                   |
+| `get_prototype_connections`    | Read prototype interactions on a node and its descendants                                                           |
+| `trace_prototype_flow`         | Trace prototype navigation between screens                                                                          |
 | `get_styles`                   | Get all local paint, text, effect, and grid styles                                                                  |
 | `get_metadata`                 | Get file name, pages, and current page info                                                                         |
 | `get_design_context`           | Get a depth-limited tree optimized for understanding design context                                                 |
@@ -109,6 +111,7 @@ If you want to know more about how it works, read the [How it works](#how-it-wor
 | `create_shape`                 | Create a rectangle, ellipse, or line                                                                                |
 | `create_shape_with_text`       | Create a FigJam shape with its own text label (SHAPE_WITH_TEXT), incl. text fill                                    |
 | `create_image`                 | Create an image-backed rectangle from a local path, URL, or data URI                                                |
+| `create_svg`                   | Import raw SVG markup or a workspace-local SVG file as editable vector layers                                       |
 | `create_sticky`                | Create a sticky note in FigJam                                                                                      |
 | `create_connector`             | Create a connector between two nodes in FigJam, with attachment anchors                                             |
 | `import_html_layers`           | Bulk-import an html-figma layer tree (JSON) as frames, text, rectangles, and vectors                                |
@@ -126,8 +129,16 @@ If you want to know more about how it works, read the [How it works](#how-it-wor
 | `set_selection`                | Set the page selection to a list of node IDs (works in Dev Mode)                                                    |
 | `scroll_and_zoom_into_view`    | Frame the viewport around the given nodes (works in Dev Mode)                                                       |
 | `delete_nodes`                 | Delete nodes with explicit confirmation                                                                             |
+| `run_script`                   | Run Plugin API JavaScript in the plugin sandbox (opt-in, see Editing Notes)                                         |
 
 All tools accept an optional `fileKey` parameter when multiple Figma files are connected. Use `list_files` to discover connected files and their keys.
+
+### Prototype Notes
+
+- Prototype tools are read-only and unavailable in FigJam. Set `includePrototype: true` on `get_node` to include the same interactions.
+- Reactions are Figma's own trigger and action data, with destinations, variables, and modes resolved to names.
+- Flow edges list their enclosing branch `conditions` from outermost to innermost (`null` marks an else branch).
+- Observed `AFTER_TIMEOUT` values are in seconds (for example, `0.8` for 800 ms).
 
 ### Editing Notes
 
@@ -139,13 +150,33 @@ All tools accept an optional `fileKey` parameter when multiple Figma files are c
 - `fit_to_content` works on SECTION nodes only (Figma's API exposes no equivalent for other containers): it shifts children so their bounding box starts at `padding` and resizes the section to bbox + 2×padding.
 - The current user must have permission to edit the target file.
 - `delete_nodes` is intentionally gated behind `confirm: true`.
+- `run_script` executes arbitrary JavaScript in the open file, so it is off unless the MCP server runs with `FIGMA_BRIDGE_ENABLE_RUN_SCRIPT=1` (see [Enabling `run_script`](#enabling-run_script)). The code is the body of an async function with `figma` in scope, and its `return` value must be JSON-serializable. Code that calls `.remove()` is rejected unless `allowRemove: true` is passed; this guards against accidental deletions and is not a security boundary. The server stops waiting after 3 minutes, but a script stuck in a loop keeps the plugin busy until it is closed. Works in Figma and FigJam.
 - Text edits automatically load the fonts currently used by the target text node before applying the new content.
 - New text nodes default to `Inter Regular` unless a font is provided.
 - `create_image` reads local paths relative to the MCP server working directory unless you pass an absolute path.
+- `create_svg` accepts raw `<svg>` markup or a local SVG path inside the MCP server working directory. SVG payloads are limited to 2 MiB.
 - `import_html_layers` takes a JSON file produced by [html-figma](https://github.com/sergcen/html-to-figma)'s browser `htmlToFigma()`. The path resolves relative to the MCP server working directory and must stay inside it, even when absolute. Everything lands inside one wrapper frame, and the response reports `layerCount` against `expectedLayerCount` so partial imports are visible.
 - `create_page` returns the new page's ID — pass it as `parentId` to `create_frame` / `create_text` / `create_shape` / `create_image` to author content on that page without switching the editor.
 - `switch_page` switches the editor to an existing page (by `pageId` or `pageName`) and the Figma desktop UI follows along. The response includes the document's full page list. To read another page's content, switch to it first, then call `get_design_context` / `get_metadata` / `get_screenshot`. If both are given, `pageId` wins; `pageName` matches exactly (case- and whitespace-sensitive) and the first matching page is used. Runtime behaviour in Dev Mode and FigJam documents is not yet verified.
 - `list_layers` lists layers in the order the Figma desktop layers panel shows them (top-most first). It defaults to the current page's top-level layers; pass `nodeId` to list a node's children (like expanding a row) or `pageId` to read another page without switching to it. Entries carry `childrenCount`, and any entry with `childrenCount > 0` is expandable — feed its `id` back as `nodeId` to walk deeper.
+
+### Enabling `run_script`
+
+`run_script` is off by default. To turn it on, add `FIGMA_BRIDGE_ENABLE_RUN_SCRIPT` to the server's `env` in your MCP configuration and restart your AI tool:
+
+```json
+{
+  "figma-bridge": {
+    "command": "npx",
+    "args": ["-y", "@gethopp/figma-mcp-bridge"],
+    "env": {
+      "FIGMA_BRIDGE_ENABLE_RUN_SCRIPT": "1"
+    }
+  }
+}
+```
+
+If several AI tools run the bridge at the same time, set the variable in each of their configurations. Only one bridge process talks to Figma at a time, and it rejects `run_script` unless it was started with the variable.
 
 ### What You Can Build
 
@@ -238,6 +269,8 @@ The MCP server is the core of the Figma MCP Bridge. It maintains a registry of W
 - Routing tool calls to the correct file based on `fileKey`
 - Forwarding responses back to the AI client
 - Handling leader election (as we can have only one WS connection to an MCP server at a time)
+
+The leader listens on `127.0.0.1` only. Its endpoints have no authentication, so other machines on the network must not reach them. If the plugin runs on another host (for example, the MCP server runs in a VM or a container), set `FIGMA_BRIDGE_HOST=0.0.0.0` (or `::`) in the MCP server environment. Use this only on a network that you trust.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐

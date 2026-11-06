@@ -1,11 +1,14 @@
 import { serializeNode } from "./serializer";
 import type { SerializableNode } from "./serializer";
 import { addLayersToFrame } from "../html-figma/figma";
+import { getPrototypeConnections, scanPrototype, tracePrototypeFlow } from "./prototype";
 
 type RequestType =
   | "get_document"
   | "get_selection"
   | "get_node"
+  | "get_prototype_connections"
+  | "trace_prototype_flow"
   | "get_layout_tree"
   | "get_styles"
   | "get_metadata"
@@ -28,6 +31,7 @@ type RequestType =
   | "create_text"
   | "create_shape"
   | "create_image"
+  | "create_svg"
   | "create_sticky"
   | "create_connector"
   | "create_section"
@@ -47,6 +51,7 @@ type RequestType =
   | "set_selection"
   | "scroll_and_zoom_into_view"
   | "delete_nodes"
+  | "run_script"
   | "get_motion_styles"
   | "get_node_motion"
   | "apply_animation_style"
@@ -66,6 +71,11 @@ type ServerRequestParams = Record<string, unknown> & {
    */
   clip?: boolean;
   depth?: number;
+  maxNodes?: number;
+  includeEmpty?: boolean;
+  includePrototype?: boolean;
+  maxScreens?: number;
+  maxNodesPerScreen?: number;
   styleId?: string;
   animationStyleId?: string;
   animationStyleData?: Record<string, unknown>;
@@ -402,6 +412,7 @@ const EDIT_REQUEST_TYPES = new Set<RequestType>([
   "create_text",
   "create_shape",
   "create_image",
+  "create_svg",
   "create_sticky",
   "create_connector",
   "create_section",
@@ -419,6 +430,7 @@ const EDIT_REQUEST_TYPES = new Set<RequestType>([
   "group_nodes",
   "ungroup_node",
   "delete_nodes",
+  "run_script",
   "apply_animation_style",
   "remove_animation_style",
   "apply_manual_keyframe_track",
@@ -433,6 +445,12 @@ const requireEditorMode = (toolName: RequestType): void => {
     throw new Error(
       `${toolName} requires the plugin to be opened in Figma's design editor (Dev Mode is read-only). Switch to the design editor and re-run.`
     );
+  }
+};
+
+const requirePrototypes = (toolName: string): void => {
+  if (isFigJam()) {
+    throw new Error(`${toolName} is not available in FigJam (FigJam files have no prototypes)`);
   }
 };
 
@@ -525,10 +543,40 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
         if (!node || node.type === "DOCUMENT") {
           throw new Error(`Node not found: ${nodeId}`);
         }
+        const data = serializeNode(node as SceneNode);
+        if (!request.params?.includePrototype) {
+          return { type: request.type, requestId: request.requestId, data };
+        }
+        requirePrototypes("get_node includePrototype");
         return {
           type: request.type,
           requestId: request.requestId,
-          data: serializeNode(node as SceneNode),
+          data: { ...data, prototype: await scanPrototype(node) },
+        };
+      }
+      case "get_prototype_connections": {
+        requirePrototypes(request.type);
+        const nodeId = request.nodeIds?.[0];
+        const root = nodeId ? await figma.getNodeByIdAsync(nodeId) : figma.currentPage;
+        if (!root || root.type === "DOCUMENT") {
+          throw new Error(`Node not found: ${nodeId}`);
+        }
+        return {
+          type: request.type,
+          requestId: request.requestId,
+          data: await getPrototypeConnections(root, request.params),
+        };
+      }
+      case "trace_prototype_flow": {
+        requirePrototypes(request.type);
+        const nodeId = request.nodeIds?.[0];
+        if (!nodeId) {
+          throw new Error("nodeId is required for trace_prototype_flow");
+        }
+        return {
+          type: request.type,
+          requestId: request.requestId,
+          data: await tracePrototypeFlow(await getSceneNodeById(nodeId), request.params),
         };
       }
       case "get_styles": {
@@ -1860,6 +1908,50 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
           },
         };
       }
+      case "create_svg": {
+        const params = request.params ?? {};
+        if (typeof params.svgText !== "string" || params.svgText.trim().length === 0) {
+          throw new Error("svgText is required for create_svg");
+        }
+
+        // Validate the destination before creating anything. createNodeFromSvg
+        // immediately inserts a node on the current page, so resolving the
+        // parent afterwards could leave an orphan behind when parentId is bad.
+        const parent =
+          typeof params.parentId === "string"
+            ? await getParentNodeById(params.parentId)
+            : undefined;
+
+        const node = figma.createNodeFromSvg(params.svgText);
+        try {
+          if (typeof params.name === "string") {
+            node.name = params.name;
+          }
+
+          resizeNodeIfSupported(node, params.width, params.height);
+          parent?.appendChild(node);
+          positionNode(node, params.x, params.y);
+        } catch (error) {
+          node.remove();
+          throw error;
+        }
+
+        return {
+          type: request.type,
+          requestId: request.requestId,
+          data: {
+            nodeId: node.id,
+            nodeName: node.name,
+            nodeType: node.type,
+            parentId: node.parent?.id,
+            x: node.x,
+            y: node.y,
+            width: node.width,
+            height: node.height,
+            childCount: node.children.length,
+          },
+        };
+      }
       case "create_sticky": {
         requireFigJamApi("create_sticky", "createSticky", figma.createSticky);
 
@@ -2556,6 +2648,35 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
             deletedCount: deletions.length,
             deletions,
           },
+        };
+      }
+      case "run_script": {
+        const code = request.params?.code;
+        if (typeof code !== "string" || code.trim() === "") {
+          throw new Error("code is required for run_script");
+        }
+        // Cheap guard against accidental deletions; not a security boundary.
+        if (/\.remove\s*(?:\?\.)?\s*\(/.test(code) && request.params?.allowRemove !== true) {
+          throw new Error("run_script: code calls .remove(); pass allowRemove: true to confirm");
+        }
+        const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+        const result = await new AsyncFunction("figma", code)(figma);
+        let serialized: string | undefined;
+        try {
+          // Symbols such as figma.mixed would otherwise be dropped or turned into null silently.
+          serialized = JSON.stringify(result, (_key, value: unknown) => {
+            if (typeof value === "symbol") {
+              throw new TypeError("symbol");
+            }
+            return value;
+          });
+        } catch {
+          throw new Error("run_script: return value must be JSON-serializable");
+        }
+        return {
+          type: request.type,
+          requestId: request.requestId,
+          data: { result: serialized === undefined ? null : JSON.parse(serialized) },
         };
       }
       case "get_motion_styles": {

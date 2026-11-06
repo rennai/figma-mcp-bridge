@@ -1,6 +1,8 @@
 import { z } from "zod";
 import type { ShapeWithTextNode } from "@figma/plugin-typings/plugin-api-standalone.js";
 
+export const MAX_SVG_BYTES = 2 * 1024 * 1024;
+
 /**
  * Figma node IDs:
  *   - top-level node:        "4029:12345"
@@ -779,6 +781,24 @@ export const createImageInput = z.object({
   fileKey: fileKeyField,
 });
 
+export const createSvgInput = z.object({
+  source: z
+    .string()
+    .min(1)
+    .describe(
+      "SVG source. Accepts raw <svg> markup or a local SVG file path inside the MCP server working directory."
+    ),
+  name: z.string().optional().describe("Optional SVG node name"),
+  parentId: createFigmaNodeIdSchema()
+    .optional()
+    .describe("Optional parent node ID to append the editable SVG into"),
+  x: z.number().optional().describe("Optional x position"),
+  y: z.number().optional().describe("Optional y position"),
+  width: z.number().positive().optional().describe("Optional width"),
+  height: z.number().positive().optional().describe("Optional height"),
+  fileKey: fileKeyField,
+});
+
 /**
  * A serialized layer tree produced by html-figma's browser `htmlToFigma()`.
  * The tree is validated loosely here (root must at least carry a node type);
@@ -877,6 +897,53 @@ export const toolInputSchemas = {
     nodeId: createFigmaNodeIdSchema().describe(
       "The node ID to fetch. Accepts top-level IDs like '4029:12345' and instance-child IDs like 'I12740:17806;12740:17793'."
     ),
+    includePrototype: z
+      .boolean()
+      .optional()
+      .describe(
+        "When true, adds a `prototype` field with the reactions on this node and its descendants (the scan get_prototype_connections returns). Not available in FigJam."
+      ),
+    fileKey: fileKeyField,
+  }),
+
+  get_prototype_connections: z.object({
+    nodeId: createFigmaNodeIdSchema()
+      .optional()
+      .describe(
+        "Root to scan (a page, screen, button, or instance). The node and all descendants, including instance sublayers, are inspected. Omit to scan the current page."
+      ),
+    maxNodes: z
+      .number()
+      .int()
+      .min(1)
+      .max(50000)
+      .optional()
+      .describe("Stop after inspecting this many nodes (default 5000); `truncated` reports it."),
+    includeEmpty: z
+      .boolean()
+      .optional()
+      .describe("Also list nodes that support reactions but have none (default false)."),
+    fileKey: fileKeyField,
+  }),
+
+  trace_prototype_flow: z.object({
+    nodeId: createFigmaNodeIdSchema().describe(
+      "Screen (or any node inside one) to start from. Screen-to-screen navigation is followed breadth-first."
+    ),
+    maxScreens: z
+      .number()
+      .int()
+      .min(1)
+      .max(500)
+      .optional()
+      .describe("Maximum screens to expand (default 25); the rest are listed in `pending`."),
+    maxNodesPerScreen: z
+      .number()
+      .int()
+      .min(1)
+      .max(50000)
+      .optional()
+      .describe("Maximum nodes to inspect on each screen (default 5000)."),
     fileKey: fileKeyField,
   }),
 
@@ -996,6 +1063,8 @@ export const toolInputSchemas = {
 
   create_image: createImageInput,
 
+  create_svg: createSvgInput,
+
   import_html_layers: importHtmlLayersInput,
 
   create_sticky: z.object({
@@ -1051,6 +1120,20 @@ export const toolInputSchemas = {
   delete_nodes: z.object({
     nodeIds: z.array(createFigmaNodeIdSchema()).min(1).describe("List of node IDs to delete"),
     confirm: z.boolean().describe("Must be true to confirm deletion"),
+    fileKey: fileKeyField,
+  }),
+
+  run_script: z.object({
+    code: z
+      .string()
+      .min(1)
+      .describe(
+        "Body of an async function run in the plugin sandbox with `figma` in scope. Use `return` to send a JSON-serializable result back."
+      ),
+    allowRemove: z
+      .boolean()
+      .optional()
+      .describe("Must be true when the code calls .remove(); otherwise the script is rejected"),
     fileKey: fileKeyField,
   }),
 
@@ -1184,6 +1267,17 @@ const createImageRpcInput = createImageInput.omit({ source: true, fileKey: true 
     .describe("Base64-encoded image bytes, resolved from `source` by the tool handler"),
 });
 
+const createSvgRpcInput = createSvgInput.omit({ source: true, fileKey: true }).extend({
+  svgText: z
+    .string()
+    .min(1)
+    .refine(
+      (value) => Buffer.byteLength(value, "utf8") <= MAX_SVG_BYTES,
+      `SVG source exceeds the ${MAX_SVG_BYTES} byte bridge limit`
+    )
+    .describe("SVG markup resolved from source by the tool handler"),
+});
+
 /**
  * Schemas the RPC path validates against. Tools whose handlers rewrite the
  * payload before forwarding validate their wire shape here; every other tool
@@ -1203,6 +1297,7 @@ const importHtmlLayersRpcInput = importHtmlLayersInput
 const rpcInputSchemas = {
   ...toolInputSchemas,
   create_image: createImageRpcInput,
+  create_svg: createSvgRpcInput,
   import_html_layers: importHtmlLayersRpcInput,
 } as const;
 
@@ -1219,6 +1314,8 @@ const rpcToArgs: Record<
   get_selection: (_nodeIds, params) => ({ ...params }),
   get_layout_tree: (nodeIds, params) => ({ ...params, rootId: nodeIds?.[0] }),
   get_node: (nodeIds, params) => ({ ...params, nodeId: nodeIds?.[0] }),
+  get_prototype_connections: (nodeIds, params) => ({ ...params, nodeId: nodeIds?.[0] }),
+  trace_prototype_flow: (nodeIds, params) => ({ ...params, nodeId: nodeIds?.[0] }),
   get_styles: (_nodeIds, params) => ({ ...params }),
   get_metadata: (_nodeIds, params) => ({ ...params }),
   get_design_context: (_nodeIds, params) => ({ ...params }),
@@ -1248,6 +1345,7 @@ const rpcToArgs: Record<
   create_shape: (_nodeIds, params) => ({ ...params }),
   create_shape_with_text: (_nodeIds, params) => ({ ...params }),
   create_image: (_nodeIds, params) => ({ ...params }),
+  create_svg: (_nodeIds, params) => ({ ...params }),
   import_html_layers: (_nodeIds, params) => ({ ...params }),
   create_sticky: (_nodeIds, params) => ({ ...params }),
   create_connector: (_nodeIds, params) => ({ ...params }),
@@ -1265,6 +1363,7 @@ const rpcToArgs: Record<
   set_selection: (nodeIds, params) => ({ nodeIds, ...params }),
   scroll_and_zoom_into_view: (nodeIds, params) => ({ nodeIds, ...params }),
   delete_nodes: (nodeIds, params) => ({ nodeIds, ...params }),
+  run_script: (_nodeIds, params) => ({ ...params }),
   save_screenshots: (_nodeIds, params) => ({ ...params }),
   get_motion_styles: (_nodeIds, params) => ({ ...params }),
   get_node_motion: (nodeIds, params) => ({ ...params, nodeId: nodeIds?.[0] }),

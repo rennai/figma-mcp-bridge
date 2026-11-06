@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { lookup } from "node:dns/promises";
-import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import type { Stats } from "node:fs";
+import { mkdir, open, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { isIP } from "node:net";
 import path from "node:path";
 import type { z } from "zod";
@@ -8,6 +9,7 @@ import type { Node } from "./node.js";
 import {
   createFrameInput,
   createImageInput,
+  createSvgInput,
   createPageInput,
   switchPageInput,
   listLayersInput,
@@ -41,6 +43,7 @@ import {
   placeBelowInput,
   placeRightOfInput,
   duplicateWithOffsetInput,
+  MAX_SVG_BYTES,
   toolInputSchemas,
 } from "./schema.js";
 import type { BridgeResponse } from "./types.js";
@@ -56,6 +59,11 @@ type ToolResult = {
 };
 
 export type ExportFormat = "PNG" | "SVG" | "JPG" | "PDF";
+
+/** `run_script` executes arbitrary code in the user's file, so it stays off unless explicitly enabled. */
+export function isRunScriptEnabled(): boolean {
+  return process.env.FIGMA_BRIDGE_ENABLE_RUN_SCRIPT === "1";
+}
 
 export interface ScreenshotSender {
   sendWithParams(
@@ -158,10 +166,37 @@ export function registerTools(server: McpServer, node: Node, port: number): void
 
   server.tool(
     "get_node",
-    "Get a specific Figma/FigJam node by ID. Accepts top-level IDs like '4029:12345' and instance-child IDs like 'I12740:17806;12740:17793'. Never use hyphens. When multiple files are connected, specify fileKey.",
+    "Get a specific Figma/FigJam node by ID. Accepts top-level IDs like '4029:12345' and instance-child IDs like 'I12740:17806;12740:17793'. Never use hyphens. Pass includePrototype: true to also get the prototype interactions on the node and its descendants. When multiple files are connected, specify fileKey.",
     toolInputSchemas.get_node.shape,
-    async ({ nodeId, fileKey }): Promise<ToolResult> => {
-      return renderResponse(() => node.send("get_node", [nodeId], fileKey));
+    async ({ nodeId, fileKey, ...params }): Promise<ToolResult> => {
+      return renderResponse(() => node.sendWithParams("get_node", [nodeId], params, fileKey));
+    }
+  );
+
+  server.tool(
+    "get_prototype_connections",
+    "Read-only. List the prototype interactions on a node and all its descendants, including instance sublayers. Each reaction is Figma's own trigger and actions (navigate/swap/overlay/scroll-to/change-to, back, close, URL, set variable/mode, conditional blocks, media), with each destination resolved to its name, screen, and page, and variables and modes resolved to names. Also returns the page's flow starting points. Not available in FigJam. When multiple files are connected, specify fileKey.",
+    toolInputSchemas.get_prototype_connections.shape,
+    async ({ nodeId, fileKey, ...params }): Promise<ToolResult> => {
+      return renderResponse(() =>
+        node.sendWithParams(
+          "get_prototype_connections",
+          nodeId ? [nodeId] : undefined,
+          params,
+          fileKey
+        )
+      );
+    }
+  );
+
+  server.tool(
+    "trace_prototype_flow",
+    "Read-only. Follow prototype navigation breadth-first from a screen: returns the screens reached (with depth and the node that reached them) and every interaction edge with its source node, trigger, action, enclosing conditional branches, and destination screen. Screens reached again are marked as revisits; unresolvable destinations are listed. Not available in FigJam. When multiple files are connected, specify fileKey.",
+    toolInputSchemas.trace_prototype_flow.shape,
+    async ({ nodeId, fileKey, ...params }): Promise<ToolResult> => {
+      return renderResponse(() =>
+        node.sendWithParams("trace_prototype_flow", [nodeId], params, fileKey)
+      );
     }
   );
 
@@ -462,6 +497,30 @@ export function registerTools(server: McpServer, node: Node, port: number): void
   );
 
   server.tool(
+    "create_svg",
+    "Insert raw SVG markup or a workspace-local SVG file as editable Figma vector layers using figma.createNodeFromSvg. You can set its parent, position, size, and semantic name. When multiple files are connected, specify fileKey.",
+    createSvgInput.shape,
+    async ({ source, fileKey, ...params }): Promise<ToolResult> => {
+      try {
+        const svgText = await loadSvgSource(source, process.cwd());
+        return await renderResponse(() =>
+          node.sendWithParams("create_svg", undefined, { ...params, svgText }, fileKey)
+        );
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: err instanceof Error ? err.message : String(err),
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.tool(
     "import_html_layers",
     "Import a DOM serialization (JSON produced by html-figma's browser htmlToFigma()) as editable Figma layers inside a new wrapper frame — frames, text, rectangles, and SVG vectors in one call. Source must be a JSON file path inside the MCP server working directory. Optionally append the wrapper into an existing frame/section via parentId. Requires the plugin to be open in the design editor. When multiple files are connected, specify fileKey.",
     importHtmlLayersInput.shape,
@@ -662,6 +721,19 @@ export function registerTools(server: McpServer, node: Node, port: number): void
       );
     }
   );
+
+  if (isRunScriptEnabled()) {
+    server.tool(
+      "run_script",
+      "Run Plugin API JavaScript in the Figma plugin sandbox. The code is the body of an async function with `figma` in scope; `return` a JSON-serializable value. Calls to .remove() are rejected unless allowRemove is true. Prefer batching related edits into one script. When multiple files are connected, specify fileKey.",
+      toolInputSchemas.run_script.shape,
+      async ({ code, allowRemove, fileKey }): Promise<ToolResult> => {
+        return renderResponse(() =>
+          node.sendWithParams("run_script", undefined, { code, allowRemove }, fileKey)
+        );
+      }
+    );
+  }
 
   server.tool(
     "get_motion_styles",
@@ -901,6 +973,130 @@ function resolveAndValidateOutputPath(outputPath: string, workspaceRoot: string)
     throw new Error(`outputPath must be inside the MCP server working directory: ${resolvedRoot}`);
   }
   return resolvedPath;
+}
+
+const SVG_PROLOG_TOKENS: ReadonlyArray<readonly [open: string, close: string]> = [
+  ["<?xml", "?>"],
+  ["<!--", "-->"],
+  ["<!DOCTYPE", ">"],
+];
+
+function stripLeadingBomAndWhitespace(source: string): string {
+  return source.replace(/^\uFEFF/, "").trimStart();
+}
+
+/** File paths never start with `<`, so anything that does is treated as inline markup. */
+function isInlineMarkup(source: string): boolean {
+  return stripLeadingBomAndWhitespace(source).startsWith("<");
+}
+
+/**
+ * Checks whether text has an `<svg>` root after the XML prolog vector editors
+ * emit: an optional BOM, XML declaration, comments, and DOCTYPE. This is a
+ * cheap pre-check for a clear error; Figma performs the full parse.
+ */
+function hasSvgRoot(source: string): boolean {
+  let rest = stripLeadingBomAndWhitespace(source);
+  for (;;) {
+    const token = SVG_PROLOG_TOKENS.find(([open]) => rest.startsWith(open));
+    if (!token) break;
+    const [open, close] = token;
+    const end = rest.indexOf(close, open.length);
+    if (end === -1) return false;
+    rest = rest.slice(end + close.length).trimStart();
+  }
+  return /^<svg[\s/>]/.test(rest);
+}
+
+/** Returns true when candidate is the root itself or a descendant of it. */
+function isPathInside(candidate: string, root: string): boolean {
+  const relativePath = path.relative(root, candidate);
+  return relativePath === "" || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath));
+}
+
+/**
+ * Compares filesystem identities rather than path strings. Node exposes the
+ * device and inode/file-index values through Stats on both POSIX and Windows.
+ */
+function isSameFile(opened: Stats, current: Stats): boolean {
+  return opened.dev === current.dev && opened.ino === current.ino;
+}
+
+/**
+ * Resolves inline SVG markup or reads a workspace-contained SVG file and
+ * validates its size and document root before forwarding it to Figma.
+ */
+async function loadSvgSource(source: string, workspaceRoot: string): Promise<string> {
+  let svgText: string;
+
+  if (isInlineMarkup(source)) {
+    svgText = source;
+  } else {
+    const resolvedRoot = await realpath(path.resolve(workspaceRoot));
+    const lexicalPath = path.resolve(resolvedRoot, source);
+    if (!isPathInside(lexicalPath, resolvedRoot)) {
+      throw new Error(
+        "SVG source must be inside the MCP server working directory: " + resolvedRoot
+      );
+    }
+
+    let resolvedPath: string;
+    try {
+      resolvedPath = await realpath(lexicalPath);
+    } catch {
+      throw new Error("SVG source not found: " + source);
+    }
+
+    if (!isPathInside(resolvedPath, resolvedRoot)) {
+      throw new Error(
+        "SVG source must be inside the MCP server working directory: " + resolvedRoot
+      );
+    }
+
+    // Read and validate through one descriptor. Re-resolving the caller's path
+    // after open and comparing file identities detects a symlink or directory
+    // swap between the containment check and open without relying on
+    // platform-specific openat/openat2 bindings that Node does not expose.
+    const file = await open(resolvedPath, "r");
+    try {
+      const openedInfo = await file.stat();
+      if (!openedInfo.isFile()) {
+        throw new Error("SVG source is not a regular file: " + source);
+      }
+      if (openedInfo.size > MAX_SVG_BYTES) {
+        throw new Error("SVG source exceeds the " + MAX_SVG_BYTES + " byte bridge limit");
+      }
+
+      let currentPath: string;
+      try {
+        currentPath = await realpath(lexicalPath);
+      } catch {
+        throw new Error("SVG source changed while it was being opened: " + source);
+      }
+      if (!isPathInside(currentPath, resolvedRoot)) {
+        throw new Error(
+          "SVG source must be inside the MCP server working directory: " + resolvedRoot
+        );
+      }
+
+      const currentInfo = await stat(currentPath);
+      if (!isSameFile(openedInfo, currentInfo)) {
+        throw new Error("SVG source changed while it was being opened: " + source);
+      }
+
+      svgText = await file.readFile({ encoding: "utf8" });
+    } finally {
+      await file.close();
+    }
+  }
+
+  if (Buffer.byteLength(svgText, "utf8") > MAX_SVG_BYTES) {
+    throw new Error("SVG source exceeds the " + MAX_SVG_BYTES + " byte bridge limit");
+  }
+  if (!hasSvgRoot(svgText)) {
+    throw new Error("SVG source must begin with an <svg> element");
+  }
+  return svgText;
 }
 
 /**
