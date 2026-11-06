@@ -183,3 +183,9 @@ server/dist/
 .claude/
 # macOS
 .DS_Store
+
+# Local agent session state
+.pi/
+
+# Build artifacts kept around for distribution
+server/server-dist.zip

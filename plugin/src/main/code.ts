@@ -2,6 +2,7 @@ import { serializeNode } from "./serializer";
 import type { SerializableNode } from "./serializer";
 import { addLayersToFrame } from "../html-figma/figma";
 import { getPrototypeConnections, scanPrototype, tracePrototypeFlow } from "./prototype";
+import { loadPageWithRetry, resolveNodeReliably, warmUpInBackground } from "./resolve";
 
 type RequestType =
   | "get_document"
@@ -169,7 +170,7 @@ const isSceneNode = (node: BaseNode | null): node is SceneNode =>
   node !== null && node.type !== "DOCUMENT" && node.type !== "PAGE";
 
 const getSceneNodeById = async (nodeId: string): Promise<SceneNode> => {
-  const node = await figma.getNodeByIdAsync(nodeId);
+  const node = await resolveNodeReliably(nodeId);
   if (!isSceneNode(node)) {
     throw new Error(`Node not found: ${nodeId}`);
   }
@@ -186,7 +187,7 @@ type TextTarget =
   | { kind: "sublayer"; node: StickyNode | ShapeWithTextNode; text: TextSublayerNode };
 
 const getTextTargetById = async (nodeId: string, toolName: string): Promise<TextTarget> => {
-  const node = await figma.getNodeByIdAsync(nodeId);
+  const node = await resolveNodeReliably(nodeId);
   if (!isSceneNode(node)) {
     throw new Error(`Node not found: ${nodeId}`);
   }
@@ -208,7 +209,7 @@ const isMotionNode = (node: SceneNode): node is SceneNode & MotionNodeMixin =>
   "applyAnimationStyle" in node;
 
 const getParentNodeById = async (parentId: string): Promise<BaseNode & ChildrenMixin> => {
-  const parent = await figma.getNodeByIdAsync(parentId);
+  const parent = await resolveNodeReliably(parentId);
   if (!parent || parent.type === "DOCUMENT" || !supportsChildren(parent)) {
     throw new Error(`Parent does not support children: ${parentId}`);
   }
@@ -216,7 +217,7 @@ const getParentNodeById = async (parentId: string): Promise<BaseNode & ChildrenM
   // until the page is explicitly loaded, so every caller would otherwise have
   // to guard before appending.
   if (parent.type === "PAGE") {
-    await parent.loadAsync();
+    await loadPageWithRetry(parent);
   }
   return parent;
 };
@@ -456,7 +457,7 @@ const requirePrototypes = (toolName: string): void => {
 
 /** Read-only geometry, deliberately independent of screenshot export. */
 async function getLayoutTree(rootId: string, maxNodes = 2000) {
-  const root = await figma.getNodeByIdAsync(rootId);
+  const root = await resolveNodeReliably(rootId);
   if (!root || root.type === "DOCUMENT" || root.type === "PAGE")
     throw new Error("Scene root required");
   const nodes: unknown[] = [];
@@ -539,11 +540,16 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
         if (!nodeId) {
           throw new Error("nodeIds is required for get_node");
         }
-        const node = await figma.getNodeByIdAsync(nodeId);
+        const node = await resolveNodeReliably(nodeId);
         if (!node || node.type === "DOCUMENT") {
           throw new Error(`Node not found: ${nodeId}`);
         }
-        const data = serializeNode(node as SceneNode);
+        // Optional depth cap keeps responses bounded on large files; nodes at
+        // the limit report childCount instead of children.
+        const depthParam = request.params?.depth;
+        const depth =
+          typeof depthParam === "number" && Number.isFinite(depthParam) ? depthParam : undefined;
+        const data = serializeNode(node as SceneNode, depth ?? Infinity);
         if (!request.params?.includePrototype) {
           return { type: request.type, requestId: request.requestId, data };
         }
@@ -557,7 +563,7 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
       case "get_prototype_connections": {
         requirePrototypes(request.type);
         const nodeId = request.nodeIds?.[0];
-        const root = nodeId ? await figma.getNodeByIdAsync(nodeId) : figma.currentPage;
+        const root = nodeId ? await resolveNodeReliably(nodeId) : figma.currentPage;
         if (!root || root.type === "DOCUMENT") {
           throw new Error(`Node not found: ${nodeId}`);
         }
@@ -701,16 +707,14 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
             } as ReturnType<typeof serializeNode> & { childCount: number };
           }
           if (serialized.children) {
-            const childNodes = await Promise.all(
-              serialized.children.map((child) => figma.getNodeByIdAsync(child.id))
+            // The children were just serialized from this very node, so they
+            // are in memory — recurse on the live nodes instead of paying an
+            // id round-trip through the resolver for each of them.
+            const liveChildren = (node as SceneNode & ChildrenMixin).children.filter(
+              (child) => child.visible !== false
             );
             const serializedChildren = await Promise.all(
-              childNodes
-                .filter(
-                  (n): n is SceneNode =>
-                    n !== null && n.type !== "DOCUMENT" && "visible" in n && n.visible !== false
-                )
-                .map((n) => serializeWithDepth(n, currentDepth + 1))
+              liveChildren.map((child) => serializeWithDepth(child, currentDepth + 1))
             );
             return {
               ...serialized,
@@ -843,7 +847,7 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
         // Determine which node(s) to export
         let targetNodes: SceneNode[];
         if (request.nodeIds && request.nodeIds.length > 0) {
-          const nodes = await Promise.all(request.nodeIds.map((id) => figma.getNodeByIdAsync(id)));
+          const nodes = await Promise.all(request.nodeIds.map((id) => resolveNodeReliably(id)));
           targetNodes = nodes.filter(
             (node): node is SceneNode =>
               node !== null && node.type !== "DOCUMENT" && node.type !== "PAGE"
@@ -908,7 +912,7 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
           | { nodeId: string; error: string }
         > = [];
         for (const { nodeId, visible } of items) {
-          const node = await figma.getNodeByIdAsync(nodeId);
+          const node = await resolveNodeReliably(nodeId);
           if (!node || node.type === "DOCUMENT" || node.type === "PAGE") {
             results.push({ nodeId, error: `Node not found: ${nodeId}` });
             continue;
@@ -1541,7 +1545,7 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
         // setups with "Unable to establish connection to Figma after 10
         // seconds". `loadAsync()` pulls the page through the document's
         // already-established channel instead.
-        await page.loadAsync();
+        await loadPageWithRetry(page);
         await figma.setCurrentPageAsync(page);
 
         return {
@@ -1562,14 +1566,14 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
 
         let container: PageNode | SceneNode;
         if (nodeId) {
-          const node = await figma.getNodeByIdAsync(nodeId);
+          const node = await resolveNodeReliably(nodeId);
           if (!node || node.type === "DOCUMENT") {
             throw new Error(`Node not found: ${nodeId}`);
           }
           // In dynamic-page mode a page obtained by ID is not necessarily
           // loaded yet — load it before reading its children (see switch_page).
           if (node.type === "PAGE") {
-            await node.loadAsync();
+            await loadPageWithRetry(node);
           }
           container = node;
         } else if (pageId) {
@@ -1577,7 +1581,7 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
           if (!page) {
             throw new Error(`Page not found: ${pageId}`);
           }
-          await page.loadAsync();
+          await loadPageWithRetry(page);
           container = page;
         } else {
           container = figma.currentPage;
@@ -2894,6 +2898,11 @@ figma.clientStorage
     figma.ui.show();
   });
 sendStatus();
+
+// Preload all pages in the background (small documents only) so the first
+// cross-page / instance-sublayer query resolves from memory instead of the
+// flaky on-demand channel. Fire-and-forget — see resolve.ts.
+warmUpInBackground();
 
 figma.on("selectionchange", () => {
   sendStatus();

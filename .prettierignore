@@ -13,3 +13,7 @@ build/
 
 # Logs
 *.log
+
+# Local agent session state
+.pi/
+server/server-dist.zip

@@ -6,6 +6,8 @@
  * names, and destinations to the screen and page that contain them.
  */
 
+import { loadPageWithRetry, resolveNodeReliably } from "./resolve";
+
 const DEFAULT_MAX_NODES = 5000;
 const DEFAULT_MAX_SCREENS = 25;
 
@@ -184,7 +186,7 @@ function memoize<T>(load: (id: string) => Promise<T>): (id: string) => Promise<T
 
 /** Resolves IDs once per request, however many reactions reference them. */
 class PrototypeReader {
-  private readonly getNode = memoize((id) => figma.getNodeByIdAsync(id));
+  private readonly getNode = memoize((id) => resolveNodeReliably(id));
   private readonly getVariable = memoize((id) => figma.variables.getVariableByIdAsync(id));
   private readonly getCollection = memoize((id) =>
     figma.variables.getVariableCollectionByIdAsync(id)
@@ -393,7 +395,7 @@ export async function scanPrototype(
   root: PageNode | SceneNode,
   options?: ScanOptions
 ): Promise<ScanResult> {
-  if (root.type === "PAGE") await root.loadAsync();
+  if (root.type === "PAGE") await loadPageWithRetry(root);
   return new PrototypeReader().scan(root, options);
 }
 
