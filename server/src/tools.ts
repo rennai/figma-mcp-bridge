@@ -166,7 +166,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
 
   server.tool(
     "get_node",
-    "Get a specific Figma/FigJam node by ID. Accepts top-level IDs like '4029:12345' and instance-child IDs like 'I12740:17806;12740:17793'. Never use hyphens. Pass includePrototype: true to also get the prototype interactions on the node and its descendants. When multiple files are connected, specify fileKey.",
+    "Get a specific Figma/FigJam node by ID. Accepts top-level IDs like '4029:12345' and instance-child IDs like 'I12740:17806;12740:17793'. Never use hyphens. Pass includePrototype: true to also get the prototype interactions on the node and its descendants. Pass depth to limit the serialized subtree size on large files. When multiple files are connected, specify fileKey.",
     toolInputSchemas.get_node.shape,
     async ({ nodeId, fileKey, ...params }): Promise<ToolResult> => {
       return renderResponse(() => node.sendWithParams("get_node", [nodeId], params, fileKey));

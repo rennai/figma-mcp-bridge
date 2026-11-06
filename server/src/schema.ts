@@ -903,6 +903,15 @@ export const toolInputSchemas = {
       .describe(
         "When true, adds a `prototype` field with the reactions on this node and its descendants (the scan get_prototype_connections returns). Not available in FigJam."
       ),
+    depth: z
+      .number()
+      .int()
+      .min(0)
+      .max(10)
+      .optional()
+      .describe(
+        "Limit the serialized subtree to N levels of descendants. Nodes at the limit report childCount (possibly 0) instead of children. Does not limit includePrototype scans. Omit for the full subtree (can be huge on large files)."
+      ),
     fileKey: fileKeyField,
   }),
 

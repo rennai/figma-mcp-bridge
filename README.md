@@ -7,6 +7,8 @@
 - 新增 `switch_page` 工具：按 `pageId` 或 `pageName` 切换 Figma 编辑器到指定页面（桌面端界面跟随切换），响应包含完整页面列表。
 - 新增 `list_layers` 工具：按桌面图层面板的顺序（最上层在前）列出图层，可用 `nodeId` 展开子图层、用 `pageId` 不切换页面直接读取其他页面的图层。
 - 修复插件响应包含 `figma.mixed` 等 symbol 值时 `figma.ui.postMessage` 抛出 “Cannot unwrap symbol” 的问题：在消息边界统一净化（JSON 序列化，symbol 转为 `"mixed"`）。
+- 修复深查询失联：`documentAccess: "dynamic-page"` 下跨页节点与实例子节点（`I` 前缀 ID）的按需检索通道不稳定（报 "Unable to establish connection to Figma after 10 seconds"）。插件内改用内存优先解析（`plugin/src/main/resolve.ts`）：小文档启动后台预热全页，查找失败时降级为显式页加载 + 内存树匹配，扫描带 90 秒总预算。需要重新构建并重导插件后生效。
+- `get_node` 新增可选 `depth` 参数（0-10 整数）：限制序列化子树深度，截断处返回 `childCount`；大文件上避免全量子树的巨型响应。需要新版插件，旧插件会忽略该参数并返回全量子树。
 - 根目录改用 Bun workspaces：`bun run --filter '*' typecheck/build` 统一执行子包脚本。
 
 - [Demo](#demo)
@@ -77,7 +79,7 @@ If you want to know more about how it works, read the [How it works](#how-it-wor
 | `list_files`                   | List all connected Figma files (supports multi-file workflows)                                                      |
 | `get_document`                 | Get the current Figma page document tree                                                                            |
 | `get_selection`                | Get the currently selected nodes in Figma                                                                           |
-| `get_node`                     | Get a specific Figma node by ID (colon format, e.g. `4029:12345`)                                                   |
+| `get_node`                     | Get a specific Figma node by ID (colon format, e.g. `4029:12345`); optional `depth` (0-10) limits the subtree       |
 | `get_prototype_connections`    | Read prototype interactions on a node and its descendants                                                           |
 | `trace_prototype_flow`         | Trace prototype navigation between screens                                                                          |
 | `get_styles`                   | Get all local paint, text, effect, and grid styles                                                                  |
